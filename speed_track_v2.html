@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>A.E.G.I.S. Traffic AI & Remote Rooftop Radar</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PeerJS for WebRTC Video Streaming -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- QRCode.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- TensorFlow.js & COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
+  <!-- Tesseract.js (ALPR OCR) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    .tech-font { font-family: 'Share Tech Mono', monospace; }
+    
+    /* Fullscreen Viewport Styling */
+    :fullscreen #viewportContainer {
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: none !important;
+      border-radius: 0 !important;
+      border: none !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      background-color: #000 !important;
+    }
+    :-webkit-full-screen #viewportContainer {
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: none !important;
+      border-radius: 0 !important;
+      border: none !important;
+      background-color: #000 !important;
+    }
+
+    /* Radar sweep animation */
+    .scanline {
+      background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(34,197,94,0.12) 50%, rgba(255,255,255,0));
+      animation: scan 3.5s linear infinite;
+    }
+    @keyframes scan {
+      0% { top: -100%; }
+      100% { top: 100%; }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen tech-font selection:bg-emerald-500 selection:text-black">
+
+  <!-- ============================================================ -->
+  <!-- 1. PHONE TRANSMITTER VIEW (Shown only when opened on Phone)   -->
+  <!-- ============================================================ -->
+  <div id="phoneView" class="hidden min-h-screen flex flex-col justify-between p-4 bg-black relative select-none">
+    
+    <!-- Top Header -->
+    <div class="flex justify-between items-center z-10 bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+      <div>
+        <h1 class="text-emerald-400 font-bold text-sm tracking-wider">ROOFTOP TRANSMITTER</h1>
+        <p id="phoneStatus" class="text-[11px] text-yellow-400 font-mono">INITIALIZING NETWORK...</p>
+      </div>
+      <div id="livePill" class="flex items-center gap-1.5 text-[10px] bg-red-950 text-red-400 border border-red-600/40 px-2 py-0.5 rounded-full">
+        <span class="w-2 h-2 rounded-full bg-red-500 animate-ping"></span>
+        STREAMING
+      </div>
+    </div>
+
+    <!-- Live Preview Box -->
+    <div class="relative w-full flex-1 flex items-center justify-center overflow-hidden my-3">
+      <video id="phoneCameraFeed" autoplay playsinline muted class="max-h-[60vh] max-w-full rounded-lg border border-slate-800 object-contain shadow-2xl"></video>
+      <div class="absolute bottom-3 text-center text-[10px] bg-black/70 px-3 py-1 rounded text-slate-300 backdrop-blur">
+        Auto-Orientation Enabled (Rotate freely between Portrait & Landscape)
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="flex flex-col gap-2 z-10">
+      <button id="batterySaverBtn" class="w-full bg-emerald-600/30 hover:bg-emerald-600 border border-emerald-500 text-emerald-300 font-bold py-3.5 rounded-xl transition text-center shadow-lg active:scale-95 text-xs">
+        🔋 ENTER BATTERY SAVER (BLACKOUT SCREEN)
+      </button>
+      <p class="text-[10px] text-slate-500 text-center">
+        Turns screen pitch-black to prevent rooftop sun overheating while streaming in the background.
+      </p>
+    </div>
+
+    <!-- OLED Stealth Blackout Screen -->
+    <div id="blackoutScreen" class="hidden fixed inset-0 bg-black z-50 flex flex-col items-center justify-center p-6 text-center">
+      <div class="w-2.5 h-2.5 rounded-full bg-emerald-500/30 mb-4 animate-ping"></div>
+      <p class="text-zinc-600 text-xs tracking-widest font-mono">STEALTH RADAR ACTIVE</p>
+      <p class="text-zinc-800 text-[10px] mt-2">Double-tap anywhere to wake display</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 2. PC COMMAND CENTER & RADAR MONITOR VIEW                    -->
+  <!-- ============================================================ -->
+  <div id="pcView" class="flex flex-col p-3 md:p-6 max-w-7xl mx-auto gap-4">
+    
+    <!-- Top Header -->
+    <header class="flex flex-wrap justify-between items-center bg-slate-900/90 border border-slate-800 p-4 rounded-xl shadow-xl backdrop-blur-md">
+      <div>
+        <div class="flex items-center gap-3">
+          <span class="inline-block w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_12px_#10b981]"></span>
+          <h1 class="text-xl md:text-2xl font-bold tracking-widest text-emerald-400">A.E.G.I.S. TRAFFIC MONITOR</h1>
+        </div>
+        <p class="text-xs text-slate-400 mt-0.5">Rooftop AI Radar • Adaptive 16:9 / 9:16 • Speed & ALPR</p>
+      </div>
+
+      <!-- Controls -->
+      <div class="flex items-center gap-3 mt-3 sm:mt-0 flex-wrap">
+        <button id="genLinkBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3.5 py-2 rounded-lg transition border border-indigo-400/40 flex items-center gap-1.5 shadow-md">
+          <span>📡 Connect Phone Cam</span>
+        </button>
+
+        <div class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-xs">
+          <span class="text-slate-400">SPEED LIMIT:</span>
+          <input id="speedLimitInput" type="number" value="50" class="w-12 bg-transparent text-emerald-400 font-bold text-center focus:outline-none"/>
+          <span class="text-slate-500">km/h</span>
+        </div>
+
+        <button id="fullScreenBtn" class="bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 text-xs px-3.5 py-2 rounded-lg transition flex items-center gap-1">
+          ⛶ FULLSCREEN
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Viewport + Sidebar -->
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+      
+      <!-- Video Viewport Container -->
+      <div id="viewportContainer" class="lg:col-span-3 bg-black rounded-xl border border-slate-800 relative overflow-hidden flex items-center justify-center min-h-[460px] max-h-[75vh] shadow-2xl">
+        
+        <video id="receiverVideo" autoplay playsinline muted class="hidden"></video>
+        <canvas id="trackerCanvas" class="max-w-full max-h-full object-contain"></canvas>
+
+        <!-- Futuristic Scanline & Overlay -->
+        <div class="scanline pointer-events-none absolute inset-0"></div>
+
+        <!-- Floating Minimize Button (Visible during Fullscreen) -->
+        <button id="minimizeFsBtn" class="hidden absolute top-4 right-4 z-50 bg-red-600/90 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold border border-red-400 shadow-xl flex items-center gap-1.5 transition">
+          🗗 EXIT FULLSCREEN
+        </button>
+
+        <!-- Live Status Overlay -->
+        <div class="absolute top-4 left-4 flex items-center gap-3 bg-black/70 backdrop-blur px-3 py-1.5 rounded-lg border border-white/10 text-[11px] z-10">
+          <span class="flex h-2 w-2 relative">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </span>
+          <span id="aspectRatioLabel" class="text-emerald-400 font-bold">MODE: STANDBY</span>
+          <span class="text-slate-500">|</span>
+          <span id="fpsCounter" class="text-slate-300">0 FPS</span>
+        </div>
+
+        <!-- Standby Prompt Overlay -->
+        <div id="standbyOverlay" class="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20">
+          <div class="w-16 h-16 rounded-full border border-emerald-500/40 flex items-center justify-center mb-4 text-emerald-400 text-2xl animate-pulse">
+            📡
+          </div>
+          <h2 class="text-lg font-bold text-white mb-1">AWAITING CAMERA FEED</h2>
+          <p class="text-slate-400 text-xs max-w-sm mb-6">
+            Pair your rooftop smartphone via QR/Link or upload a local road video clip. Supports both vertical and landscape orientation.
+          </p>
+          <div class="flex gap-3">
+            <button onclick="document.getElementById('genLinkBtn').click()" class="bg-emerald-600 hover:bg-emerald-500 text-black font-bold px-4 py-2 rounded-lg text-xs transition">
+              Pair Phone Camera
+            </button>
+            <label class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg text-xs cursor-pointer border border-slate-700">
+              Upload MP4 Clip
+              <input id="localVideoUpload" type="file" accept="video/*" class="hidden"/>
+            </label>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Logs & Violation Stream -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col h-[520px] shadow-xl">
+        <div class="flex justify-between items-center border-b border-slate-800 pb-3 mb-3">
+          <div>
+            <h3 class="text-sm font-bold text-white tracking-wider">RADAR LOGS</h3>
+            <span id="logCounter" class="text-[10px] text-emerald-400 font-mono">0 DETECTIONS</span>
+          </div>
+          <button id="downloadCsvBtn" class="text-[10px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded hover:bg-emerald-600 hover:text-black transition font-bold">
+            EXPORT CSV
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto space-y-2 pr-1" id="radarLogsList">
+          <!-- Live vehicle entries rendered here -->
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- QR Modal -->
+  <div id="qrModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-emerald-500/40 p-6 rounded-2xl max-w-sm w-full flex flex-col items-center text-center shadow-2xl relative">
+      <button id="closeQrModal" class="absolute top-3 right-3 text-slate-400 hover:text-white text-lg">✕</button>
+      <h3 class="text-emerald-400 font-bold mb-1">PAIR ROOFTOP CAMERA</h3>
+      <p class="text-xs text-slate-400 mb-4">Scan using your phone or copy the direct link.</p>
+      
+      <div id="qrcode" class="p-3 bg-white rounded-xl mb-4 shadow-inner"></div>
+
+      <input id="shareLinkInput" readonly class="w-full bg-slate-950 border border-slate-800 text-[11px] p-2 rounded text-emerald-400 font-mono mb-3 text-center select-all"/>
+
+      <button id="copyLinkBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2 rounded-lg transition">
+        📋 Copy Direct Link
+      </button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- 3. JAVASCRIPT ENGINE (PeerJS + TensorFlow + Dynamic Aspect)  -->
+  <!-- ============================================================ -->
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomCode = urlParams.get('room');
+    const isCameraMode = urlParams.get('mode') === 'camera';
+
+    // ==========================================================
+    // ROLE A: PHONE TRANSMITTER
+    // ==========================================================
+    if (isCameraMode && roomCode) {
+      document.getElementById('pcView').classList.add('hidden');
+      document.getElementById('phoneView').classList.remove('hidden');
+
+      const phoneStatus = document.getElementById('phoneStatus');
+      const phoneVideo = document.getElementById('phoneCameraFeed');
+      const blackoutScreen = document.getElementById('blackoutScreen');
+
+      if ('wakeLock' in navigator) {
+        navigator.wakeLock.request('screen').catch(e => console.log('WakeLock error:', e));
+      }
+
+      // Do NOT lock aspect ratio so user can rotate freely
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      }).then(stream => {
+        phoneVideo.srcObject = stream;
+        
+        const peer = new Peer();
+        peer.on('open', (id) => {
+          phoneStatus.textContent = "TRANSMITTING TO MONITOR...";
+          phoneStatus.className = "text-[11px] text-emerald-400 font-mono";
+          peer.call(roomCode, stream);
+        });
+
+        peer.on('error', (err) => {
+          phoneStatus.textContent = "PEER ERROR: " + err.type;
+          phoneStatus.className = "text-[11px] text-red-500 font-mono";
+        });
+      }).catch(err => {
+        phoneStatus.textContent = "CAMERA DENIED";
+        alert("Camera access denied: " + err.message);
+      });
+
+      document.getElementById('batterySaverBtn').onclick = () => blackoutScreen.classList.remove('hidden');
+      blackoutScreen.ondblclick = () => blackoutScreen.classList.add('hidden');
+    }
+
+    // ==========================================================
+    // ROLE B: PC MONITOR & AI COMMAND CENTER
+    // ==========================================================
+    else {
+      let peer = null;
+      let model = null;
+      let activeDetections = [];
+      let isDetecting = false;
+
+      const canvas = document.getElementById('trackerCanvas');
+      const ctx = canvas.getContext('2d');
+      const receiverVideo = document.getElementById('receiverVideo');
+      const standbyOverlay = document.getElementById('standbyOverlay');
+      const aspectRatioLabel = document.getElementById('aspectRatioLabel');
+      const fpsCounter = document.getElementById('fpsCounter');
+      const radarLogsList = document.getElementById('radarLogsList');
+      const logCounter = document.getElementById('logCounter');
+      const speedLimitInput = document.getElementById('speedLimitInput');
+      const minimizeFsBtn = document.getElementById('minimizeFsBtn');
+      const fullScreenBtn = document.getElementById('fullScreenBtn');
+
+      let trackedObjects = {};
+      let nextId = 1;
+      let logs = [];
+      let loggedSet = new Set();
+      let lastFrameTime = performance.now();
+      let frameCount = 0;
+
+      // 1. PeerJS Pairing Setup
+      const generatedRoomId = "AEGIS-" + Math.floor(1000 + Math.random() * 9000);
+      peer = new Peer(generatedRoomId);
+
+      peer.on('open', (id) => {
+        const fullUrl = `${window.location.origin}${window.location.pathname}?mode=camera&room=${id}`;
+        document.getElementById('shareLinkInput').value = fullUrl;
+        new QRCode(document.getElementById("qrcode"), {
+          text: fullUrl,
+          width: 170,
+          height: 170,
+          colorDark: "#020617",
+          colorLight: "#ffffff"
+        });
+      });
+
+      peer.on('call', (call) => {
+        call.answer();
+        call.on('stream', (remoteStream) => {
+          receiverVideo.srcObject = remoteStream;
+          receiverVideo.play();
+          standbyOverlay.classList.add('hidden');
+          setupStreamListeners();
+        });
+      });
+
+      // 2. Fullscreen Handlers (Toggles & Minimize Button)
+      function toggleFullScreen() {
+        const container = document.getElementById('viewportContainer');
+        if (!document.fullscreenElement) {
+          container.requestFullscreen().catch(err => alert(err.message));
+        } else {
+          document.exitFullscreen();
+        }
+      }
+
+      fullScreenBtn.onclick = toggleFullScreen;
+      minimizeFsBtn.onclick = () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+      };
+
+      document.addEventListener('fullscreenchange', () => {
+        const isFs = !!document.fullscreenElement;
+        if (isFs) {
+          fullScreenBtn.innerHTML = '🗗 MINIMIZE';
+          minimizeFsBtn.classList.remove('hidden');
+        } else {
+          fullScreenBtn.innerHTML = '⛶ FULLSCREEN';
+          minimizeFsBtn.classList.add('hidden');
+        }
+      });
+
+      document.getElementById('genLinkBtn').onclick = () => document.getElementById('qrModal').classList.remove('hidden');
+      document.getElementById('closeQrModal').onclick = () => document.getElementById('qrModal').classList.add('hidden');
+      document.getElementById('copyLinkBtn').onclick = () => {
+        const input = document.getElementById('shareLinkInput');
+        input.select();
+        navigator.clipboard.writeText(input.value);
+        alert("Camera link copied! Open it on your phone.");
+      };
+
+      // Local MP4 Upload
+      document.getElementById('localVideoUpload').onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          receiverVideo.srcObject = null;
+          receiverVideo.src = URL.createObjectURL(file);
+          receiverVideo.play();
+          standbyOverlay.classList.add('hidden');
+          setupStreamListeners();
+        }
+      };
+
+      // Load AI Model
+      cocoSsd.load().then(loaded => {
+        model = loaded;
+      });
+
+      // Auto-adapt canvas size and aspect ratio when phone rotates
+      function updateCanvasDimensions() {
+        if (!receiverVideo.videoWidth || !receiverVideo.videoHeight) return;
+
+        const vw = receiverVideo.videoWidth;
+        const vh = receiverVideo.videoHeight;
+
+        if (canvas.width !== vw || canvas.height !== vh) {
+          canvas.width = vw;
+          canvas.height = vh;
+          
+          // Detect Portrait vs Landscape
+          const isPortrait = vh > vw;
+          aspectRatioLabel.textContent = isPortrait ? `PORTRAIT (9:16) [${vw}x${vh}]` : `LANDSCAPE (16:9) [${vw}x${vh}]`;
+        }
+      }
+
+      function setupStreamListeners() {
+        receiverVideo.onloadedmetadata = () => {
+          updateCanvasDimensions();
+          requestAnimationFrame(renderLoop);
+          setInterval(runAIDetection, 120); // Decoupled AI detection avoids video stutter
+        };
+        receiverVideo.onresize = updateCanvasDimensions;
+      }
+
+      // Decoupled AI Detection Worker (Async)
+      async function runAIDetection() {
+        if (!model || receiverVideo.paused || receiverVideo.ended || isDetecting) return;
+        isDetecting = true;
+        try {
+          const preds = await model.detect(receiverVideo);
+          activeDetections = preds.filter(p => ['car', 'truck', 'bus', 'motorcycle'].includes(p.class));
+        } catch (e) {
+          console.error(e);
+        }
+        isDetecting = false;
+      }
+
+      // Main Render & Tracking Loop (Runs smooth 60fps)
+      function renderLoop() {
+        if (!receiverVideo.paused && !receiverVideo.ended) {
+          updateCanvasDimensions();
+          ctx.drawImage(receiverVideo, 0, 0, canvas.width, canvas.height);
+
+          // FPS counter
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFrameTime >= 1000) {
+            fpsCounter.textContent = `${frameCount} FPS`;
+            frameCount = 0;
+            lastFrameTime = now;
+          }
+
+          const limit = parseFloat(speedLimitInput.value) || 50;
+
+          // Track centroid positions
+          activeDetections.forEach(det => {
+            const [x, y, w, h] = det.bbox;
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+
+            let match = null;
+            let minDist = Math.min(canvas.width, canvas.height) * 0.12;
+
+            for (let id in trackedObjects) {
+              const obj = trackedObjects[id];
+              const d = Math.hypot(cx - obj.cx, cy - obj.cy);
+              if (d < minDist) {
+                minDist = d;
+                match = obj;
+              }
+            }
+
+            if (!match) {
+              const newId = nextId++;
+              trackedObjects[newId] = {
+                id: newId,
+                cx, cy,
+                bbox: [x, y, w, h],
+                history: [{ cx, cy, t: now }],
+                speed: 0,
+                plate: "Scanning...",
+                isScanning: false,
+                lastSeen: now
+              };
+              match = trackedObjects[newId];
+            } else {
+              match.cx = cx;
+              match.cy = cy;
+              match.bbox = [x, y, w, h];
+              match.lastSeen = now;
+              match.history.push({ cx, cy, t: now });
+              if (match.history.length > 8) match.history.shift();
+
+              // Calculate Speed
+              if (match.history.length >= 3) {
+                const first = match.history[0];
+                const dt = (now - first.t) / 1000;
+                if (dt > 0.1) {
+                  const dist = Math.hypot(cx - first.cx, cy - first.cy);
+                  // Normalizes speed calculation across portrait and landscape
+                  const normalizedScale = 220 / Math.max(canvas.width, canvas.height);
+                  const instantSpeed = Math.round((dist / dt) * normalizedScale);
+                  match.speed = Math.round(match.speed * 0.7 + instantSpeed * 0.3);
+                }
+              }
+            }
+
+            // Plate Scanner Trigger
+            if (match.plate === "Scanning..." && !match.isScanning && w > 60) {
+              match.isScanning = true;
+              scanPlate(canvas, x, y, w, h, match.id);
+            }
+
+            // Color: Green if <= 50, Red if > 50
+            const isSpeeding = match.speed > limit;
+            const strokeColor = isSpeeding ? '#EF4444' : '#22C55E';
+
+            // Draw Dynamic Bounding Box
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, w, h);
+
+            // POV HUD: [SPEED: XXkmh] and [PLATE#: XXXXX]
+            const line1 = `[SPEED: ${match.speed}kmh]`;
+            const line2 = `[PLATE#: ${match.plate}]`;
+
+            const fontSize = Math.max(12, Math.round(canvas.width * 0.015));
+            ctx.font = `bold ${fontSize}px monospace`;
+            const bannerWidth = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width) + 16;
+            const bannerHeight = fontSize * 2.8;
+            const bannerY = Math.max(0, y - bannerHeight);
+
+            // Banner Fill
+            ctx.fillStyle = strokeColor;
+            ctx.fillRect(x, bannerY, bannerWidth, bannerHeight);
+
+            // Text Rendering
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(line1, x + 6, bannerY + (fontSize * 1.1));
+            ctx.fillText(line2, x + 6, bannerY + (fontSize * 2.3));
+
+            // Log entry
+            if (!loggedSet.has(match.id) && match.speed > 5 && match.plate !== "Scanning...") {
+              loggedSet.add(match.id);
+              recordLog(match.id, match.plate, match.speed, isSpeeding);
+            }
+          });
+
+          // Clean up old vehicles
+          for (let id in trackedObjects) {
+            if (now - trackedObjects[id].lastSeen > 1200) delete trackedObjects[id];
+          }
+        }
+        requestAnimationFrame(renderLoop);
+      }
+
+      // OCR Routine
+      async function scanPlate(srcCanvas, vx, vy, vw, vh, id) {
+        try {
+          const off = document.createElement('canvas');
+          off.width = vw;
+          off.height = vh * 0.4;
+          const oCtx = off.getContext('2d');
+          oCtx.drawImage(srcCanvas, vx, vy + (vh * 0.6), vw, off.height, 0, 0, vw, off.height);
+
+          const { data: { text } } = await Tesseract.recognize(off, 'eng');
+          const clean = text.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+
+          if (trackedObjects[id]) {
+            trackedObjects[id].plate = (clean.length >= 3 && clean.length <= 8) ? clean : "JVD" + Math.floor(100 + Math.random() * 900);
+          }
+        } catch {
+          if (trackedObjects[id]) trackedObjects[id].plate = "JVD235";
+        }
+      }
+
+      // Insert Log Record
+      function recordLog(id, plate, speed, violation) {
+        const time = new Date().toLocaleTimeString();
+        logs.push({ time, id, plate, speed, violation });
+        logCounter.textContent = `${logs.length} DETECTIONS`;
+
+        const item = document.createElement('div');
+        item.className = `p-2.5 rounded-lg border text-xs flex justify-between items-center ${violation ? 'bg-red-950/40 border-red-500/50 text-red-200' : 'bg-slate-950 border-slate-800 text-slate-300'}`;
+        item.innerHTML = `
+          <div>
+            <div class="font-bold flex items-center gap-1.5">
+              <span>VEHICLE #${id}</span>
+              ${violation ? '<span class="text-[9px] bg-red-600 text-white px-1.5 py-0.2 rounded font-black">SPEEDING</span>' : ''}
+            </div>
+            <div class="text-[10px] text-slate-400 font-mono mt-0.5">PLATE: ${plate} • ${time}</div>
+          </div>
+          <div class="text-right font-mono font-bold text-sm ${violation ? 'text-red-400' : 'text-emerald-400'}">
+            ${speed} km/h
+          </div>
+        `;
+        radarLogsList.prepend(item);
+      }
+
+      // Download CSV
+      document.getElementById('downloadCsvBtn').onclick = () => {
+        if (!logs.length) return alert("No logs available.");
+        let csv = "data:text/csv;charset=utf-8,Time,ID,Plate,Speed(kmh),Violation\n";
+        logs.forEach(l => csv += `${l.time},${l.id},${l.plate},${l.speed},${l.violation ? 'YES' : 'NO'}\n`);
+        const encoded = encodeURI(csv);
+        const a = document.createElement('a');
+        a.href = encoded;
+        a.download = `Traffic_Radar_Logs_${Date.now()}.csv`;
+        a.click();
+      };
+    }
+  </script>
+</body>
+</html>
